@@ -1,0 +1,20 @@
+# Local Postgres with pgvector (mirrors Aurora PostgreSQL 16 + pgvector).
+# Apply the schema with `make migrate` after `docker compose up -d`.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: emailrag
+      POSTGRES_PASSWORD: emailrag
+      POSTGRES_DB: emailrag
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emailrag"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

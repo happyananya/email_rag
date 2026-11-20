@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+frontend/.env.local
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
