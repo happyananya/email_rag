@@ -51,7 +51,7 @@ class DataStack(Stack):
             serverless_v2_max_capacity=4,
             vpc=self.vpc,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
-            credentials=rds.Credentials.from_generated_secret("emailrag"),
+            credentials=rds.Credentials.from_generated_secret("emailrag", secret_name="email-rag/db"),
             default_database_name="emailrag",
             storage_encrypted=True,
             storage_encryption_key=self.key,
