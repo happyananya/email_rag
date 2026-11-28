@@ -54,5 +54,34 @@ jobs:
         env:
           CDK_DEFAULT_REGION: us-east-1
 
-  # Deployment is intentionally manual for now (`make deploy`). To enable CD, add an
-  # OIDC role (aws-actions/configure-aws-credentials) and a deploy job gated on main.
+  deploy-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    needs: [backend, frontend, infra]
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: python -m venv .venv && .venv/bin/pip install -r requirements.txt
+        working-directory: infra
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: make deploy STAGE=dev DEPLOY_APPROVAL=never
+        env:
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_USER_POOL_ID: ${{ vars.NEXT_PUBLIC_USER_POOL_ID }}
+          NEXT_PUBLIC_USER_POOL_CLIENT_ID: ${{ vars.NEXT_PUBLIC_USER_POOL_CLIENT_ID }}

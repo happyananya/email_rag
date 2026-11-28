@@ -15,7 +15,7 @@ up each AWS service in the architecture.
 | Role | Owner | Backup | Owns (AWS services) |
 |---|---|---|---|
 | **A. Infra & DevOps lead** | _(assign)_ | B | IAM, VPC/NAT, CloudFormation/CDK, CloudWatch, X-Ray, CloudTrail, Budgets, CI/CD |
-| **B. Data & Ingestion** | _(assign)_ | C | Aurora PostgreSQL + pgvector, S3 (email bucket), SQS + DLQ, Lambda (Sync, Worker, Backfill), Step Functions, EventBridge |
+| **B. Data & Ingestion** | _(assign)_ | C | RDS PostgreSQL + pgvector, S3 (email bucket), SQS + DLQ, Lambda (Sync, Worker, Backfill), Step Functions, EventBridge |
 | **C. AI & API** | _(assign)_ | B | Amazon Bedrock, API Gateway, Lambda (API) |
 | **D. Frontend, Auth & Security** | _(assign)_ | A | Route 53, ACM, S3 (web) + CloudFront, Cognito, Secrets Manager, KMS |
 
@@ -239,9 +239,8 @@ or `email-rag/` (secrets), which keeps these scoped to our project.
 > Generated resource names (bucket, queues, functions) follow the patterns above; confirm the real
 > names with `make outputs` after the first deploy and adjust the ARNs if needed.
 >
-> `rds-data:*` only works once the Data API is enabled on the cluster (`enable_data_api=True` in
-> `infra/stacks/data.py`, task B2 below). The database sits in isolated subnets with no public endpoint,
-> so the RDS Query Editor (via the Data API) is how we inspect it.
+> The database sits in isolated subnets with no public endpoint. Inspect it through a controlled
+> VPC connection (for example, an SSM tunnel) rather than exposing it publicly.
 
 ### 2.5 Each person, on first login
 
@@ -270,7 +269,7 @@ Every AWS service in the architecture, who sets it up, and where it lives in cod
 | 5 | X-Ray | A | Lambda/API/SFN `tracing` flags | Verify traces end-to-end |
 | 6 | AWS Budgets | A | `infra/stacks/backend.py` + console | Budget amount, alert emails |
 | 7 | CloudTrail | A | console | Org trail, all regions |
-| 8 | Aurora PostgreSQL Serverless v2 + pgvector | B | `infra/stacks/data.py`, `backend/src/email_rag/migrations/` | Capacity, Data API, migrations, index tuning |
+| 8 | RDS PostgreSQL 16 + pgvector | B | `infra/stacks/data.py`, `backend/src/email_rag/migrations/` | Instance sizing, migrations, index tuning |
 | 9 | S3: raw email bucket | B | `infra/stacks/data.py` | Lifecycle rules, prefix layout |
 | 10 | SQS ingestion queue + DLQ | B | `infra/stacks/backend.py` | Visibility timeout, max receives, redrive |
 | 11 | Lambda: Sync, Worker, Backfill, Migrate | B | `infra/stacks/backend.py`, `backend/.../handlers/` | Memory/timeout/concurrency tuning |
@@ -296,50 +295,51 @@ OAuth client and consent screen, and B owns the Pub/Sub topic and push subscript
 ### A. Infra & DevOps lead
 
 - [ ] A1. Root hardening, budget, CloudTrail, IAM groups/users/policies (section 2).
-- [ ] A2. `npx aws-cdk@latest bootstrap aws://<ACCOUNT_ID>/us-east-1`.
-- [ ] A3. First `make deploy STAGE=dev`; share `make outputs` with the team (pin them in the team chat).
+- [x] A2. `npx aws-cdk@latest bootstrap aws://<ACCOUNT_ID>/us-east-1`.
+- [x] A3. First `make deploy STAGE=dev`; share `make outputs` with the team (pin them in the team chat).
 - [ ] A4. Set `alarmEmail` and `budgetUsd` in `infra/cdk.json`; confirm the SNS subscription email.
-- [ ] A5. CloudWatch dashboard: API latency p50/p90, Lambda errors/duration, queue depth/age, DLQ, Bedrock latency.
+- [x] A5. CloudWatch dashboard: API latency p50/p90, Lambda errors/duration, queue depth/age, DLQ, Bedrock latency.
 - [ ] A6. CI/CD: GitHub OIDC identity provider + `GitHubDeployRole` (assumes `cdk-*` roles); add a deploy job on `main` to `.github/workflows/ci.yml`.
-- [ ] A7. Cost review each week (Cost Explorer by service); NAT and Aurora are the biggest fixed costs.
-- [ ] A8. Write the "how to deploy" and "how to roll back" runbook in the README.
+- [ ] A7. Cost review each week (Cost Explorer by service); NAT and RDS are the biggest fixed costs.
+- [x] A8. Write the "how to deploy" and "how to roll back" runbook in `docs/operations.md`.
 
 ### B. Data & Ingestion
 
-- [ ] B1. Run `make db-up && make migrate` locally; fix any SQL issues before the first AWS deploy.
-- [ ] B2. Enable the Aurora **Data API** (`enable_data_api=True`) so the team can use the RDS Query Editor.
-- [ ] B3. Consider `serverless_v2_min_capacity=0` (auto-pause) to cut idle cost; measure the resume delay.
-- [ ] B4. Verify the backfill state machine on a test Gmail account; add a `Catch` that marks the account `error`.
-- [ ] B5. Re-backfill accounts whose History API cursor expired (currently they only get `status='error'`).
+- [x] B1. Run `make db-up && make migrate` locally; fix any SQL issues before the first AWS deploy.
+- [ ] B2. Verify the private RDS PostgreSQL connection and migration Lambda after deployment.
+- [ ] B3. Review `db.t4g.micro` CPU/storage metrics and resize only if the test workload requires it.
+- [x] B4. Verify the backfill state machine and its terminal `Catch` on a test Gmail account.
+- [ ] B5. Verify that an expired Gmail History API cursor automatically starts a fresh backfill.
 - [ ] B6. Gmail push: Google Cloud Pub/Sub topic, grant `gmail-api-push@system.gserviceaccount.com`
       Publisher, push subscription to the `GmailWebhookPath` output, deploy with `-c gmailPubsubTopic=...`.
-- [ ] B7. DLQ runbook: how to inspect and redrive failed messages.
-- [ ] B8. S3 lifecycle rule for the email bucket (e.g. Intelligent-Tiering after 30 days).
-- [ ] B9. Integration tests for `services/ingest.py` with a sample `.eml` corpus.
+- [x] B7. DLQ runbook: how to inspect and redrive failed messages.
+- [x] B8. S3 lifecycle rule for the email bucket (Intelligent-Tiering after 30 days).
+- [x] B9. Integration tests for `services/ingest.py` with a sample `.eml` corpus.
 
 ### C. AI & API
 
-- [ ] C1. **Day 1:** Bedrock console → *Model access* → request Claude and Titan Text Embeddings V2 (approval can take time).
-- [ ] C2. Confirm the Claude model ID available in `us-east-1`; set `llmModelId` context if it differs.
-- [ ] C3. Verify the Bedrock IAM actions for the Mantle endpoint and tighten `resources` from `*` to model ARNs.
-- [ ] C4. Measure latency: summary < ~10 s, draft < ~15 s. Tune `LLM_EFFORT`, `max_tokens`, or use a faster model for summaries.
+- [x] C1. **Day 1:** Bedrock console → *Model access* → request Claude and Titan Text Embeddings V2 (approval can take time).
+- [x] C2. Confirm the Claude model ID available in `us-east-1`; set `llmModelId` context if it differs.
+- [x] C3. After the first successful Lambda invocation, tighten Bedrock `resources` from `*` to the
+      final foundation-model and inference-profile ARNs.
+- [ ] C4. Measure latency: summary < ~10 s, draft < ~15 s. Tune `max_tokens` or evaluate another model if needed.
 - [ ] C5. Build a small RAG eval set (20–30 questions with known answers from a test inbox); tune chunk size and `RAG_TOP_K`.
-- [ ] C6. API Gateway: throttling per stage, access logging, request validation.
-- [ ] C7. Summary caching: return the stored summary unless the thread has new messages.
+- [x] C6. API Gateway: throttling per stage, access logging, request validation.
+- [x] C7. Summary caching: return the stored summary unless the thread has new messages.
 - [ ] C8. API integration tests (local Postgres + mocked Bedrock).
 
 ### D. Frontend, Auth & Security
 
-- [ ] D1. Google Cloud: create the project, enable the Gmail API, set up the OAuth consent screen (add all 4 as **test users**), and create a Web OAuth client with redirect URIs `<WebUrl>/auth/callback` and `http://localhost:3000/auth/callback`.
-- [ ] D2. Put the Google client credentials into `email-rag/google-oauth-client` (Secrets Manager).
-- [ ] D3. Fill `frontend/.env.local` from the outputs; redeploy so the SPA is built with them.
+- [x] D1. Google Cloud: create the project, enable the Gmail API, set up the OAuth consent screen (add all 4 as **test users**), and create a Web OAuth client with redirect URIs `<WebUrl>/auth/callback` and `http://localhost:3000/auth/callback`.
+- [x] D2. Put the Google client credentials into `email-rag/google-oauth-client` (Secrets Manager).
+- [x] D3. Fill `frontend/.env.local` from the outputs; redeploy so the SPA is built with them.
 - [ ] D4. Cognito: confirm email verification works; decide on optional MFA for app users.
-- [ ] D5. CloudFront: add a response-headers policy (HSTS, CSP, X-Frame-Options).
+- [ ] D5. Verify the CloudFront security response-headers policy and static-route rewrites after deploy.
 - [ ] D6. Optional custom domain: Route 53 hosted zone + `-c domainName=... -c hostedZoneName=...`.
 - [ ] D7. **Per-tenant encryption** (promised in the proposal): design and implement either a KMS key per user or envelope encryption with a per-tenant data key + encryption context.
 - [ ] D8. Postgres **row-level security** policies (with B) as a second safeguard on top of the `user_id` filters.
 - [ ] D9. Replace the webhook `?token=` check with verification of Pub/Sub's signed OIDC token (with B).
-- [ ] D10. UI polish: loading states, error toasts, empty states, mobile layout.
+- [x] D10. UI polish: loading states, inline errors/status, empty states, mobile layout.
 
 ---
 
@@ -363,7 +363,7 @@ Blocking dependencies: C1 (Bedrock access) and D1/D2 (Google OAuth) gate the smo
 ## 6. Shared rules
 
 - **One shared `dev` stage.** Personal stacks (`-c stage=<name>`) each create their own NAT gateway and
-  Aurora cluster, which multiplies fixed cost. Only use them briefly and destroy them afterwards
+  RDS instance, which multiplies fixed cost. Only use them briefly and destroy them afterwards
   (`npx aws-cdk@latest destroy --all -c stage=<name>`).
 - **Coordinate deploys** in the team chat ("deploying Backend to dev") since we share one stage.
 - **PRs need the backup's review** for changes to stacks in `infra/`.
@@ -376,7 +376,7 @@ Blocking dependencies: C1 (Bedrock access) and D1/D2 (Google OAuth) gate the smo
 | Item | Approx. | Note |
 |---|---|---|
 | NAT gateway | ~$33 + data | Biggest fixed cost; VPC endpoints can reduce data charges |
-| Aurora Serverless v2 (0.5 ACU min) | ~$45 | Near $0 idle if min capacity is 0 (auto-pause) |
+| RDS PostgreSQL `db.t4g.micro` | Free-plan eligible / usage-based | Single-AZ, 20 GiB gp3 |
 | Secrets Manager | ~$0.40 per secret | One per connected Gmail account + app secrets |
 | KMS key | ~$1 | Per key; per-tenant keys add $1/user |
 | Lambda, SQS, API GW, S3, CloudFront | low | Usage-based; small for a class project |

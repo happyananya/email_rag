@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Email RAG SaaS backend: API, sync and ingestion Lambdas"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=2.12",         # Claude on Bedrock via AnthropicBedrockMantle
+    "anthropic>=2.12",         # Claude Messages API via the Bedrock Runtime endpoint
     "boto3>=1.35",
     "httpx>=0.27",
     "psycopg[binary]>=3.2",

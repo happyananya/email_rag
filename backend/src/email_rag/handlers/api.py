@@ -15,7 +15,11 @@ from email_rag.services.mime import parse_raw
 
 logger = Logger()
 tracer = Tracer()
-app = APIGatewayRestResolver(cors=CORSConfig(allow_origin=settings().frontend_url))
+ALLOWED_TONES = {"professional", "friendly", "concise", "formal"}
+ALLOWED_LENGTHS = {"short", "medium", "long"}
+app = APIGatewayRestResolver(
+    cors=CORSConfig(allow_origin=settings().frontend_url, extra_origins=["http://localhost:3000"])
+)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -47,6 +51,7 @@ def load_thread(user_id: str, account_id: str, thread_id: str) -> list[dict]:
             "recipients": r["recipients"],
             "sent_at": r["sent_at"].isoformat() if r["sent_at"] else None,
             "body": parsed.body,
+            "html_body": parsed.html_body,
             "attachments": parsed.attachments,
         })
     return out
@@ -61,6 +66,18 @@ def serialize(row: dict | None) -> dict | None:
         return None
     return {k: (str(v) if not isinstance(v, (str, int, float, bool, list, dict, type(None)))
                 else v) for k, v in row.items()}
+
+
+def parse_before(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BadRequestError("before must be an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise BadRequestError("before must include a timezone")
+    return parsed
 
 
 # --- accounts --------------------------------------------------------------
@@ -134,7 +151,7 @@ def list_threads(account_id: str):
     require_account(user["id"], account_id)
     before = app.current_event.get_query_string_value("before")
     rows = repo.list_threads(
-        user["id"], account_id, before=datetime.fromisoformat(before) if before else None
+        user["id"], account_id, before=parse_before(before)
     )
     return [serialize(r) for r in rows]
 
@@ -143,7 +160,9 @@ def list_threads(account_id: str):
 def get_thread(account_id: str, thread_id: str):
     user = current_user()
     require_account(user["id"], account_id)
-    summary = repo.latest_summary(user["id"], account_id, thread_id)
+    summary = repo.latest_summary(
+        user["id"], account_id, thread_id, settings().llm_model_id
+    )
     return {
         "emails": load_thread(user["id"], account_id, thread_id),
         "summary": serialize(summary),
@@ -156,6 +175,11 @@ def get_thread(account_id: str, thread_id: str):
 def summarize(account_id: str, thread_id: str):
     user = current_user()
     require_account(user["id"], account_id)
+    cached = repo.latest_summary(
+        user["id"], account_id, thread_id, settings().llm_model_id
+    )
+    if cached:
+        return serialize(cached)
     content = llm.summarize_thread(load_thread(user["id"], account_id, thread_id))
     return serialize(
         repo.save_summary(user["id"], account_id, thread_id, content, settings().llm_model_id)
@@ -168,8 +192,15 @@ def draft(account_id: str, thread_id: str):
     require_account(user["id"], account_id)
     b = body()
     tone, length = b.get("tone", "professional"), b.get("length", "short")
+    instructions = (b.get("instructions") or "").strip()
+    if tone not in ALLOWED_TONES:
+        raise BadRequestError(f"tone must be one of: {', '.join(sorted(ALLOWED_TONES))}")
+    if length not in ALLOWED_LENGTHS:
+        raise BadRequestError(f"length must be one of: {', '.join(sorted(ALLOWED_LENGTHS))}")
+    if len(instructions) > 2000:
+        raise BadRequestError("instructions must be 2000 characters or fewer")
     content = llm.draft_reply(
-        load_thread(user["id"], account_id, thread_id), tone, length, b.get("instructions", "")
+        load_thread(user["id"], account_id, thread_id), tone, length, instructions
     )
     return serialize(repo.save_draft(user["id"], account_id, thread_id, tone, length, content))
 
@@ -186,6 +217,8 @@ def extract_action_items(account_id: str, thread_id: str):
 def list_action_items():
     user = current_user()
     status = app.current_event.get_query_string_value("status")
+    if status not in (None, "open", "done"):
+        raise BadRequestError("status must be 'open' or 'done'")
     return [serialize(r) for r in repo.list_action_items(user["id"], status)]
 
 
@@ -208,6 +241,8 @@ def ask():
     question = (b.get("question") or "").strip()
     if not question:
         raise BadRequestError("question is required")
+    if len(question) > 2000:
+        raise BadRequestError("question must be 2000 characters or fewer")
     account_id = b.get("account_id")
     if account_id:
         require_account(user["id"], account_id)

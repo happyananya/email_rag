@@ -2,13 +2,13 @@
 # Apply the schema with `make migrate` after `docker compose up -d`.
 services:
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.6-pg16-bookworm
     environment:
       POSTGRES_USER: emailrag
       POSTGRES_PASSWORD: emailrag
       POSTGRES_DB: emailrag
     ports:
-      - "5432:5432"
+      - "${EMAIL_RAG_DB_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

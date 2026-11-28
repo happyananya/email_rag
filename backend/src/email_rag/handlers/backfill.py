@@ -49,7 +49,16 @@ def finish(event, _context):
     return event
 
 
+def fail(event, _context):
+    """Record terminal workflow failures so the UI does not show an endless backfill."""
+    repo.update_sync_state(event["account_id"], status="error")
+    logger.error("backfill failed", extra=event)
+    return event
+
+
 @logger.inject_lambda_context
 def handler(event, context):
     step = event.get("step", "list_page")
-    return {"start": start, "list_page": list_page, "finish": finish}[step](event, context)
+    return {"start": start, "list_page": list_page, "finish": finish, "fail": fail}[step](
+        event, context
+    )

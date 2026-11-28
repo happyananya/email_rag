@@ -1,6 +1,6 @@
-"""Layer 4 (data) + Layer 5 (secrets/crypto): VPC, Aurora PostgreSQL + pgvector, S3, KMS, secrets."""
+"""Layer 4 (data) + Layer 5 (secrets/crypto): VPC, RDS PostgreSQL + pgvector, S3, KMS, secrets."""
 
-from aws_cdk import CfnOutput, RemovalPolicy, Stack
+from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_kms as kms
 from aws_cdk import aws_rds as rds
@@ -40,24 +40,31 @@ class DataStack(Stack):
             self, "LambdaSg", vpc=self.vpc, description="Email RAG Lambdas"
         )
 
-        self.db = rds.DatabaseCluster(
+        # Free-plan accounts require Aurora Express, whose IAM-only/public networking model is not
+        # compatible with these private password-authenticated Lambdas. RDS PostgreSQL t4g.micro is
+        # Free Tier eligible, stays private in the VPC, and supports the pgvector extension.
+        self.db = rds.DatabaseInstance(
             self,
             "Db",
-            engine=rds.DatabaseClusterEngine.aurora_postgres(
-                version=rds.AuroraPostgresEngineVersion.VER_16_4
+            engine=rds.DatabaseInstanceEngine.postgres(
+                version=rds.PostgresEngineVersion.VER_16_13
             ),
-            writer=rds.ClusterInstance.serverless_v2("writer"),
-            serverless_v2_min_capacity=0.5,
-            serverless_v2_max_capacity=4,
+            instance_type=ec2.InstanceType.of(
+                ec2.InstanceClass.BURSTABLE4_GRAVITON, ec2.InstanceSize.MICRO
+            ),
             vpc=self.vpc,
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
             credentials=rds.Credentials.from_generated_secret("emailrag", secret_name="email-rag/db"),
-            default_database_name="emailrag",
+            database_name="emailrag",
+            allocated_storage=20,
+            storage_type=rds.StorageType.GP3,
+            multi_az=False,
+            publicly_accessible=False,
             storage_encrypted=True,
             storage_encryption_key=self.key,
             removal_policy=RemovalPolicy.SNAPSHOT,
         )
-        self.db.connections.allow_default_port_from(self.lambda_sg, "Lambdas to Aurora")
+        self.db.connections.allow_default_port_from(self.lambda_sg, "Lambdas to RDS PostgreSQL")
 
         self.email_bucket = s3.Bucket(
             self,
@@ -67,6 +74,18 @@ class DataStack(Stack):
             bucket_key_enabled=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ArchiveRawEmail",
+                    enabled=True,
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.INTELLIGENT_TIERING,
+                            transition_after=Duration.days(30),
+                        )
+                    ],
+                )
+            ],
             removal_policy=RemovalPolicy.RETAIN,
         )
 

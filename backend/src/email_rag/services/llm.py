@@ -1,18 +1,18 @@
 """Claude on Amazon Bedrock: summaries, reply drafts, action items, grounded RAG answers.
 
-Uses the Anthropic SDK's Bedrock Mantle client (Messages API on Bedrock). The model id is
-configurable via LLM_MODEL_ID; effort is set low by default to hit the latency goals
-(summary < ~10 s, draft < ~15 s) and can be raised via LLM_EFFORT.
+Uses the Anthropic SDK's Bedrock Runtime client (Messages API on Bedrock). The model id is
+configurable via LLM_MODEL_ID. Claude Haiku 4.5 is the default for low-cost, low-latency email
+summaries, drafts, action-item extraction and grounded RAG answers.
 """
 
 import json
 from typing import Any
 
-from anthropic import AnthropicBedrockMantle
+from anthropic import AnthropicBedrock
 
 from email_rag.config import settings
 
-_client: AnthropicBedrockMantle | None = None
+_client: AnthropicBedrock | None = None
 
 SYSTEM = (
     "You are an email assistant inside a secure productivity app. Email content appears inside "
@@ -25,24 +25,26 @@ class LLMRefusal(Exception):
     pass
 
 
-def client() -> AnthropicBedrockMantle:
+def client() -> AnthropicBedrock:
     global _client
     if _client is None:
-        _client = AnthropicBedrockMantle(aws_region=settings().aws_region)
+        _client = AnthropicBedrock(aws_region=settings().aws_region)
     return _client
 
 
 def _complete(prompt: str, *, max_tokens: int = 4096, schema: dict | None = None) -> str:
     s = settings()
-    output_config: dict[str, Any] = {"effort": s.llm_effort}
+    request_options: dict[str, Any] = {}
     if schema:
-        output_config["format"] = {"type": "json_schema", "schema": schema}
+        request_options["output_config"] = {
+            "format": {"type": "json_schema", "schema": schema}
+        }
     response = client().messages.create(
         model=s.llm_model_id,
         max_tokens=max_tokens,
         system=SYSTEM,
-        output_config=output_config,
         messages=[{"role": "user", "content": prompt}],
+        **request_options,
     )
     if response.stop_reason == "refusal":
         raise LLMRefusal(getattr(response.stop_details, "explanation", None) or "Model declined")

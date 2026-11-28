@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useEffect, useState } from "react";
+import { RichText } from "@/components/RichText";
 import { api, type Account, type Source } from "@/lib/api";
 
 export default function AskPage() {
@@ -11,9 +12,10 @@ export default function AskPage() {
   const [sources, setSources] = useState<Source[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [accountsLoading, setAccountsLoading] = useState(true);
 
   useEffect(() => {
-    api.accounts().then(setAccounts).catch((e) => setError(e.message));
+    api.accounts().then(setAccounts).catch((e) => setError(e.message)).finally(() => setAccountsLoading(false));
   }, []);
 
   async function submit(e: FormEvent) {
@@ -38,8 +40,8 @@ export default function AskPage() {
       <form onSubmit={submit} className="row">
         <input style={{ flex: 1, minWidth: 240 }} value={question} onChange={(e) => setQuestion(e.target.value)}
                placeholder="e.g. When is the Q3 planning meeting and who is presenting?" />
-        <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-          <option value="">All inboxes</option>
+        <select disabled={accountsLoading} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+          <option value="">{accountsLoading ? "Loading inboxes…" : "All inboxes"}</option>
           {accounts.map((a) => <option key={a.id} value={a.id}>{a.email_address}</option>)}
         </select>
         <button className="primary" disabled={busy}>{busy ? "Searching…" : "Ask"}</button>
@@ -47,7 +49,7 @@ export default function AskPage() {
       {error && <p className="error">{error}</p>}
       {answer && (
         <div className="panel" style={{ marginTop: 16 }}>
-          <div style={{ whiteSpace: "pre-wrap" }}>{answer}</div>
+          <RichText>{answer}</RichText>
         </div>
       )}
       {sources.length > 0 && (

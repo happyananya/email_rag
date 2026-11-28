@@ -24,6 +24,7 @@ export type Email = {
   recipients: string[];
   sent_at: string | null;
   body: string;
+  html_body: string | null;
   attachments: string[];
 };
 export type ActionItem = {
@@ -73,7 +74,10 @@ export const api = {
   gmailCallback: (code: string) => post<Account>("/accounts/gmail/callback", { code }),
   disconnect: (id: string) => request<{ deleted: string }>(`/accounts/${id}`, { method: "DELETE" }),
 
-  threads: (accountId: string) => request<ThreadSummary[]>(`/accounts/${accountId}/threads`),
+  threads: (accountId: string, before?: string) => {
+    const query = before ? `?before=${encodeURIComponent(before)}` : "";
+    return request<ThreadSummary[]>(`/accounts/${accountId}/threads${query}`);
+  },
   thread: (accountId: string, threadId: string) =>
     request<{ emails: Email[]; summary: { content: string } | null }>(
       `/accounts/${accountId}/threads/${threadId}`,

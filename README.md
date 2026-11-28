@@ -14,11 +14,11 @@ and the code map in [docs/architecture.md](docs/architecture.md).
 Browser ─ Route 53 ─ CloudFront ─ S3 (Next.js SPA)          Cognito (JWT)
    │
    └─ API Gateway (Cognito authorizer) ─ API Lambda ─┬─ Bedrock (Claude + Titan embeddings)
-                                                     ├─ Aurora PostgreSQL + pgvector
+                                                     ├─ RDS PostgreSQL + pgvector
                                                      ├─ S3 (raw emails)
                                                      └─ Step Functions (initial backfill)
 EventBridge (15 min) ┐                                          │
-Gmail push → Pub/Sub ┴─ Sync Lambda (History API) ─ SQS ─ Worker Lambda ─ S3 / Bedrock / Aurora
+Gmail push → Pub/Sub ┴─ Sync Lambda (History API) ─ SQS ─ Worker Lambda ─ S3 / Bedrock / RDS
                                                      └─ DLQ
 Secrets Manager (OAuth tokens) · KMS · CloudWatch alarms · AWS Budgets
 ```
@@ -69,6 +69,9 @@ npx aws-cdk@latest bootstrap        # once per account/region
 make deploy STAGE=dev               # builds the SPA and deploys all stacks
 make outputs                        # API URL, Cognito ids, web URL, ...
 ```
+
+See [docs/operations.md](docs/operations.md) for pre-deploy checks, rollback, CloudWatch validation,
+DLQ inspection/redrive, and the optional GitHub Actions OIDC deployment job.
 
 Useful context flags (`infra/cdk.json` or `-c key=value`): `alarmEmail`, `budgetUsd`,
 `domainName` + `hostedZoneName` (custom domain; deploy in us-east-1), `gmailPubsubTopic`,

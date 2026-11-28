@@ -1,6 +1,7 @@
 """Minimal Gmail REST client (OAuth 2.0, messages, History API, push watch)."""
 
 import base64
+import random
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -18,6 +19,39 @@ SCOPES = [
     "email",
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
+MAX_REQUEST_ATTEMPTS = 5
+TRANSIENT_STATUSES = {429, 500, 502, 503, 504}
+TRANSIENT_403_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "backendError"}
+
+
+def _gmail_error_reasons(response: httpx.Response) -> set[str]:
+    """Return structured Gmail error reasons without depending on the human-readable message."""
+    try:
+        error = response.json().get("error", {})
+    except (ValueError, AttributeError):
+        return set()
+    reasons = {item.get("reason") for item in error.get("errors", []) if item.get("reason")}
+    reasons.update(
+        detail.get("reason") for detail in error.get("details", []) if detail.get("reason")
+    )
+    return reasons
+
+
+def _is_retryable(response: httpx.Response) -> bool:
+    return response.status_code in TRANSIENT_STATUSES or (
+        response.status_code == 403
+        and bool(_gmail_error_reasons(response) & TRANSIENT_403_REASONS)
+    )
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return min(float(retry_after), 30.0)
+        except ValueError:
+            pass
+    return min((2**attempt) + random.uniform(0, 1), 30.0)
 
 
 def _client_creds() -> dict[str, str]:
@@ -78,17 +112,16 @@ class GmailClient:
         return self.tokens["access_token"]
 
     def _get(self, path: str, **params) -> dict[str, Any]:
-        for attempt in range(5):
+        for attempt in range(MAX_REQUEST_ATTEMPTS):
             resp = self.http.get(
                 path, params=params, headers={"Authorization": f"Bearer {self._access_token()}"}
             )
-            if resp.status_code in (429, 500, 503):  # rate limit / transient: exponential backoff
-                time.sleep(2**attempt)
+            if _is_retryable(resp) and attempt < MAX_REQUEST_ATTEMPTS - 1:
+                time.sleep(_retry_delay(resp, attempt))
                 continue
             resp.raise_for_status()
             return resp.json()
-        resp.raise_for_status()
-        return {}
+        raise RuntimeError("unreachable")
 
     def profile(self) -> dict[str, Any]:
         return self._get("/profile")

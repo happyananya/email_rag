@@ -26,7 +26,16 @@ def test_parse_raw_extracts_metadata_and_body():
     assert parsed.recipients == ["bob@example.com", "carol@example.com"]
     assert parsed.sent_at.year == 2026
     assert parsed.body == "Let's meet Thursday."
+    assert parsed.html_body is None
     assert parsed.attachments == ["plan.pdf"]
+
+
+def test_parse_raw_preserves_html_for_safe_ui_rendering():
+    html = "<html><body><h1>Q3 planning</h1><img src='https://example.com/chart.png'></body></html>"
+    parsed = parse_raw(_raw("Plain-text version for search.", html))
+
+    assert parsed.body == "Plain-text version for search."
+    assert parsed.html_body.rstrip() == html
 
 
 def test_html_to_text_skips_scripts():

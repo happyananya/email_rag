@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 import jsii
-from aws_cdk import CfnOutput, Duration, ILocalBundling, Stack, triggers
+from aws_cdk import CfnOutput, Duration, ILocalBundling, RemovalPolicy, Stack, triggers
 from aws_cdk import aws_apigateway as apigw
 from aws_cdk import aws_budgets as budgets
 from aws_cdk import aws_cloudwatch as cw
@@ -105,8 +105,8 @@ class BackendStack(Stack):
             "FRONTEND_URL": frontend_url,
             "OAUTH_REDIRECT_URI": f"{frontend_url}/auth/callback",
             "GMAIL_PUBSUB_TOPIC": self.node.try_get_context("gmailPubsubTopic") or "",
-            "LLM_MODEL_ID": self.node.try_get_context("llmModelId") or "anthropic.claude-opus-5-5",
-            "LLM_EFFORT": "low",
+            "LLM_MODEL_ID": self.node.try_get_context("llmModelId")
+            or "us.anthropic.claude-haiku-4-5-20251001-v1:0",
             "EMBEDDING_MODEL_ID": "amazon.titan-embed-text-v2:0",
             "EMBEDDING_DIMENSIONS": "1024",
             "POWERTOOLS_SERVICE_NAME": "email-rag",
@@ -143,14 +143,31 @@ class BackendStack(Stack):
             ],
             resources=[f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:email-rag/oauth/*"],
         )
-        # Bedrock: Titan embeddings via bedrock-runtime, Claude via the Bedrock Mantle (Messages API)
-        # endpoint. Tighten resources to specific model ARNs once the models are chosen; verify the
-        # Mantle IAM action names against current Bedrock docs.
-        bedrock_policy = iam.PolicyStatement(
-            actions=[
-                "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock-mantle:*",
+        embedding_policy = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=[
+                f"arn:{self.partition}:bedrock:{self.region}::foundation-model/"
+                f"{env['EMBEDDING_MODEL_ID']}"
             ],
-            resources=["*"],
+        )
+        llm_model_id = env["LLM_MODEL_ID"]
+        if llm_model_id.startswith("us."):
+            foundation_model_id = llm_model_id.removeprefix("us.")
+            llm_resources = [
+                f"arn:{self.partition}:bedrock:{self.region}:{self.account}:"
+                f"inference-profile/{llm_model_id}",
+                *[
+                    f"arn:{self.partition}:bedrock:{region}::foundation-model/{foundation_model_id}"
+                    for region in ("us-east-1", "us-east-2", "us-west-2")
+                ],
+            ]
+        else:
+            llm_resources = [
+                f"arn:{self.partition}:bedrock:{self.region}::foundation-model/{llm_model_id}"
+            ]
+        llm_policy = iam.PolicyStatement(
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=llm_resources,
         )
 
         api_fn = fn("ApiFn", "email_rag.handlers.api.handler", Duration.seconds(29), memory=1024)
@@ -160,15 +177,16 @@ class BackendStack(Stack):
         migrate_fn = fn("MigrateFn", "email_rag.handlers.migrate.handler", Duration.minutes(5))
 
         for f in (api_fn, worker_fn):
-            f.add_to_role_policy(bedrock_policy)
+            f.add_to_role_policy(embedding_policy)
+        api_fn.add_to_role_policy(llm_policy)
         for f in (sync_fn, backfill_fn):
             queue.grant_send_messages(f)
         data.webhook_secret.grant_read(sync_fn)
 
         worker_fn.add_event_source(event_sources.SqsEventSource(
-            queue, batch_size=10, max_batching_window=Duration.seconds(5),
+            queue, batch_size=5, max_batching_window=Duration.seconds(5),
             report_batch_item_failures=True,
-            max_concurrency=10,  # caps Gmail/Bedrock request rates
+            max_concurrency=2,  # protect Gmail's per-user quota during large backfills/redrives
         ))
 
         # Run DB migrations whenever the migration code changes.
@@ -191,6 +209,15 @@ class BackendStack(Stack):
         })
         finish = invoke("Finish", {"step": "finish", "account_id.$": "$.account_id",
                                    "queued.$": "$.queued"})
+        mark_error = tasks.LambdaInvoke(
+            self, "MarkBackfillError", lambda_function=backfill_fn,
+            payload=sfn.TaskInput.from_object({
+                "step": "fail", "account_id.$": "$.account_id", "error.$": "$.error",
+            }),
+            payload_response_only=True,
+        )
+        for task in (start, list_page, finish):
+            task.add_catch(mark_error, errors=["States.ALL"], result_path="$.error")
         more = (sfn.Choice(self, "MorePages")
                 .when(sfn.Condition.boolean_equals("$.done", True), finish)
                 .otherwise(list_page))
@@ -201,7 +228,9 @@ class BackendStack(Stack):
             tracing_enabled=True,
         )
         backfill.grant_start_execution(api_fn)
+        backfill.grant_start_execution(sync_fn)
         api_fn.add_environment("BACKFILL_STATE_MACHINE_ARN", backfill.state_machine_arn)
+        sync_fn.add_environment("BACKFILL_STATE_MACHINE_ARN", backfill.state_machine_arn)
 
         # ---------------- Scheduled incremental sync (EventBridge) ----------------
         events.Rule(
@@ -211,12 +240,30 @@ class BackendStack(Stack):
         )
 
         # ---------------- REST API (API Gateway + Cognito authorizer) ----------------
+        api_access_logs = logs.LogGroup(
+            self,
+            "ApiAccessLogs",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
         api = apigw.RestApi(
             self, "Api",
             rest_api_name="email-rag-api",
             deploy_options=apigw.StageOptions(
                 stage_name="v1", tracing_enabled=True, metrics_enabled=True,
                 throttling_rate_limit=50, throttling_burst_limit=100,
+                access_log_destination=apigw.LogGroupLogDestination(api_access_logs),
+                access_log_format=apigw.AccessLogFormat.json_with_standard_fields(
+                    caller=False,
+                    http_method=True,
+                    ip=True,
+                    protocol=True,
+                    request_time=True,
+                    resource_path=True,
+                    response_length=True,
+                    status=True,
+                    user=True,
+                ),
             ),
             default_cors_preflight_options=apigw.CorsOptions(
                 allow_origins=[frontend_url, "http://localhost:3000"],
@@ -265,6 +312,68 @@ class BackendStack(Stack):
         for a in alarms:
             a.add_alarm_action(notify)
 
+        dashboard = cw.Dashboard(
+            self, "OperationsDashboard", dashboard_name=f"{self.stack_name}-Ops"
+        )
+        dashboard.add_widgets(
+            cw.GraphWidget(
+                title="API latency",
+                left=[
+                    api.metric_latency(statistic="p50", period=Duration.minutes(5)),
+                    api.metric_latency(statistic="p90", period=Duration.minutes(5)),
+                ],
+            ),
+            cw.GraphWidget(
+                title="API and Lambda errors",
+                left=[api.metric_server_error(period=Duration.minutes(5))]
+                + [
+                    f.metric_errors(period=Duration.minutes(5))
+                    for f in (api_fn, sync_fn, worker_fn, backfill_fn)
+                ],
+            ),
+        )
+        dashboard.add_widgets(
+            cw.GraphWidget(
+                title="Lambda duration p90",
+                left=[
+                    f.metric_duration(statistic="p90", period=Duration.minutes(5))
+                    for f in (api_fn, sync_fn, worker_fn, backfill_fn)
+                ],
+            ),
+            cw.GraphWidget(
+                title="Ingestion queue",
+                left=[
+                    queue.metric_approximate_number_of_messages_visible(),
+                    queue.metric_approximate_number_of_messages_not_visible(),
+                    dlq.metric_approximate_number_of_messages_visible(),
+                ],
+                right=[queue.metric_approximate_age_of_oldest_message()],
+            ),
+        )
+        dashboard.add_widgets(
+            cw.GraphWidget(
+                title="Bedrock latency and throttles",
+                left=[
+                    cw.Metric(
+                        namespace="AWS/Bedrock",
+                        metric_name="InvocationLatency",
+                        dimensions_map={"ModelId": env["LLM_MODEL_ID"]},
+                        statistic="p90",
+                        period=Duration.minutes(5),
+                    )
+                ],
+                right=[
+                    cw.Metric(
+                        namespace="AWS/Bedrock",
+                        metric_name="InvocationThrottles",
+                        dimensions_map={"ModelId": env["LLM_MODEL_ID"]},
+                        statistic="Sum",
+                        period=Duration.minutes(5),
+                    )
+                ],
+            )
+        )
+
         budget_usd = float(self.node.try_get_context("budgetUsd") or 50)
         if alarm_email:
             budgets.CfnBudget(
@@ -287,4 +396,7 @@ class BackendStack(Stack):
 
         CfnOutput(self, "ApiUrl", value=api.url)
         CfnOutput(self, "GmailWebhookPath", value=f"{api.url}webhooks/gmail?token=<email-rag/gmail-webhook token>")
+        CfnOutput(self, "IngestQueueUrl", value=queue.queue_url)
         CfnOutput(self, "IngestDlqUrl", value=dlq.queue_url)
+        CfnOutput(self, "IngestDlqArn", value=dlq.queue_arn)
+        CfnOutput(self, "OperationsDashboardName", value=dashboard.dashboard_name)

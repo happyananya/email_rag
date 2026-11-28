@@ -41,6 +41,24 @@ class FrontendStack(Stack):
                 validation=acm.CertificateValidation.from_dns(zone),
             )
 
+        route_rewrite = cloudfront.Function(
+            self,
+            "RouteRewrite",
+            runtime=cloudfront.FunctionRuntime.JS_2_0,
+            code=cloudfront.FunctionCode.from_inline(
+                """function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  if (uri.slice(-1) === '/') {
+    request.uri = uri + 'index.html';
+  } else if (uri.indexOf('.') === -1) {
+    request.uri = uri + '/index.html';
+  }
+  return request;
+}"""
+            ),
+        )
+
         dist = cloudfront.Distribution(
             self,
             "Cdn",
@@ -49,6 +67,11 @@ class FrontendStack(Stack):
                 origin=origins.S3BucketOrigin.with_origin_access_control(bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                response_headers_policy=cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+                function_associations=[cloudfront.FunctionAssociation(
+                    function=route_rewrite,
+                    event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
+                )],
             ),
             error_responses=[
                 cloudfront.ErrorResponse(http_status=403, response_http_status=404,
@@ -56,7 +79,9 @@ class FrontendStack(Stack):
             ],
             domain_names=[domain_name] if cert else None,
             certificate=cert,
-            minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+            minimum_protocol_version=(
+                cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021 if cert else None
+            ),
         )
 
         if zone:

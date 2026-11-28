@@ -16,7 +16,6 @@ class Settings:
     backfill_state_machine_arn: str
     # Bedrock
     llm_model_id: str
-    llm_effort: str
     embedding_model_id: str
     embedding_dimensions: int
     # Google OAuth / Gmail
@@ -39,8 +38,9 @@ def settings() -> Settings:
         email_bucket=env("EMAIL_BUCKET", "email-rag-local"),
         ingest_queue_url=env("INGEST_QUEUE_URL", ""),
         backfill_state_machine_arn=env("BACKFILL_STATE_MACHINE_ARN", ""),
-        llm_model_id=env("LLM_MODEL_ID", "anthropic.claude-opus-5-5"),
-        llm_effort=env("LLM_EFFORT", "low"),
+        llm_model_id=env(
+            "LLM_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        ),
         embedding_model_id=env("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0"),
         embedding_dimensions=int(env("EMBEDDING_DIMENSIONS", "1024")),
         google_client_secret_arn=env("GOOGLE_CLIENT_SECRET_ARN", ""),

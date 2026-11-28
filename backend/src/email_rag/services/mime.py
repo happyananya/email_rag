@@ -16,6 +16,7 @@ class ParsedEmail:
     recipients: list[str]
     sent_at: datetime | None
     body: str
+    html_body: str | None = None
     attachments: list[str] = field(default_factory=list)
 
 
@@ -50,10 +51,12 @@ def parse_raw(raw: bytes) -> ParsedEmail:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
 
     body_part = msg.get_body(preferencelist=("plain", "html"))
+    html_part = msg.get_body(preferencelist=("html",))
     body = ""
     if body_part is not None:
         content = body_part.get_content()
         body = html_to_text(content) if body_part.get_content_type() == "text/html" else content
+    html_body = html_part.get_content() if html_part is not None else None
 
     attachments = [p.get_filename() for p in msg.iter_attachments() if p.get_filename()]
     recipients = [
@@ -72,6 +75,7 @@ def parse_raw(raw: bytes) -> ParsedEmail:
         recipients=recipients,
         sent_at=sent_at,
         body=clean_body(body),
+        html_body=html_body,
         attachments=attachments,
     )
 

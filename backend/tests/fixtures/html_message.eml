@@ -1,0 +1,17 @@
+From: Carol Example <carol@example.com>
+To: Bob Example <bob@example.com>
+Date: Fri, 27 Nov 2026 10:30:00 -0500
+Message-ID: <html-1@example.com>
+Subject: Design review notes
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="email-rag-boundary"
+
+--email-rag-boundary
+Content-Type: text/plain; charset="utf-8"
+
+The design review is complete. The next review is Tuesday at 2 PM.
+--email-rag-boundary
+Content-Type: text/html; charset="utf-8"
+
+<html><body><h1>Design review</h1><p>The review is complete.</p><p><strong>Next review:</strong> Tuesday at 2 PM.</p></body></html>
+--email-rag-boundary--

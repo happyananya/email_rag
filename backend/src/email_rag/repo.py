@@ -108,18 +108,36 @@ def insert_email(
     snippet: str | None,
     labels: list[str],
     s3_key: str,
-) -> str | None:
-    """Insert an email; returns its id, or None if it was already ingested (idempotent)."""
+) -> str:
+    """Upsert email metadata and return its id so interrupted ingestion can resume."""
     row = get_conn().execute(
         """INSERT INTO emails (user_id, account_id, provider_message_id, thread_id, subject,
                                sender, recipients, sent_at, snippet, labels, s3_key)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (account_id, provider_message_id) DO NOTHING
+           ON CONFLICT (account_id, provider_message_id) DO UPDATE SET
+             thread_id = EXCLUDED.thread_id,
+             subject = EXCLUDED.subject,
+             sender = EXCLUDED.sender,
+             recipients = EXCLUDED.recipients,
+             sent_at = EXCLUDED.sent_at,
+             snippet = EXCLUDED.snippet,
+             labels = EXCLUDED.labels,
+             s3_key = EXCLUDED.s3_key
            RETURNING id""",
         (user_id, account_id, provider_message_id, thread_id, subject, sender,
          Jsonb(recipients), sent_at, snippet, labels, s3_key),
     ).fetchone()
-    return str(row["id"]) if row else None
+    return str(row["id"])
+
+
+def count_email_chunks(user_id: str, account_id: str, email_id: str) -> int:
+    """Return the indexed chunk count, preserving tenant isolation on retry checks."""
+    row = get_conn().execute(
+        """SELECT count(*) AS count FROM email_chunks
+           WHERE user_id = %s AND account_id = %s AND email_id = %s""",
+        (user_id, account_id, email_id),
+    ).fetchone()
+    return int(row["count"])
 
 
 def insert_chunks(
@@ -183,11 +201,21 @@ def save_summary(user_id: str, account_id: str, thread_id: str, content: str, mo
     ).fetchone()
 
 
-def latest_summary(user_id: str, account_id: str, thread_id: str) -> Row | None:
+def latest_summary(
+    user_id: str, account_id: str, thread_id: str, model: str | None = None
+) -> Row | None:
+    """Return a cached summary only when it matches the model and no newer email was ingested."""
     return get_conn().execute(
-        """SELECT * FROM summaries WHERE user_id = %s AND account_id = %s AND thread_id = %s
-           ORDER BY created_at DESC LIMIT 1""",
-        (user_id, account_id, thread_id),
+        """SELECT s.* FROM summaries s
+           WHERE s.user_id = %s AND s.account_id = %s AND s.thread_id = %s
+             AND (%s::text IS NULL OR s.model = %s)
+             AND NOT EXISTS (
+                 SELECT 1 FROM emails e
+                 WHERE e.user_id = s.user_id AND e.account_id = s.account_id
+                   AND e.thread_id = s.thread_id AND e.created_at > s.created_at
+             )
+           ORDER BY s.created_at DESC LIMIT 1""",
+        (user_id, account_id, thread_id, model, model),
     ).fetchone()
 
 
@@ -208,12 +236,24 @@ def save_action_items(
     out = []
     for item in items:
         due = item.get("due_date")
-        out.append(conn.execute(
+        due_date = date.fromisoformat(due) if due else None
+        row = conn.execute(
             """INSERT INTO action_items (user_id, account_id, thread_id, description, owner, due_date)
-               VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT DO NOTHING RETURNING *""",
             (user_id, account_id, thread_id, item["description"], item.get("owner"),
-             date.fromisoformat(due) if due else None),
-        ).fetchone())
+             due_date),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """SELECT * FROM action_items
+                   WHERE user_id = %s AND account_id = %s AND thread_id = %s
+                     AND lower(description) = lower(%s)
+                     AND owner IS NOT DISTINCT FROM %s
+                     AND due_date IS NOT DISTINCT FROM %s""",
+                (user_id, account_id, thread_id, item["description"], item.get("owner"), due_date),
+            ).fetchone()
+        out.append(row)
     return out
 
 

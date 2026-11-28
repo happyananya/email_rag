@@ -23,13 +23,15 @@ Step numbers refer to the arrows on the architecture diagram.
   backfill started.
 - **Backfill state machine** (`infra/stacks/backend.py`, tasks in `handlers/backfill.py`):
   `Start` (records current `historyId`) → `ListPage` loop (enqueue ids, capped by
-  `MAX_BACKFILL_MESSAGES`) → `Finish` (Gmail `watch`, status `active`).
+  `MAX_BACKFILL_MESSAGES`) → `Finish` (Gmail `watch`, status `active`). Terminal task failures are
+  caught and mark the account `error`.
 
 ## 3. Email Ingestion Pipeline (12–24)
 
 - **EventBridge rule** (every 15 min) and **Gmail push** (Pub/Sub → `POST /webhooks/gmail?token=`)
   both invoke the **Sync Lambda** (`handlers/sync.py`), which calls the History API and puts new
-  message ids on **SQS**.
+  message ids on **SQS**. If a Gmail history cursor has expired, Sync automatically starts a fresh
+  backfill.
 - **Worker Lambda** (`handlers/worker.py` → `services/ingest.py`): fetch raw message → S3 →
   parse MIME (`services/mime.py`) → chunk (`services/chunking.py`) → embed
   (`services/embeddings.py`) → insert into `email_chunks`.
@@ -39,25 +41,32 @@ Step numbers refer to the arrows on the architecture diagram.
 
 - **Amazon Bedrock**
   - Embeddings: Titan Text Embeddings V2 (`amazon.titan-embed-text-v2:0`, 1024 dims).
-  - LLM: Claude via the Anthropic SDK's `AnthropicBedrockMantle` client
-    (`services/llm.py`, default `anthropic.claude-opus-5-5`, `LLM_EFFORT=low` for latency).
+  - LLM: Claude via the Anthropic SDK's `AnthropicBedrock` Runtime client
+    (`services/llm.py`, default US inference profile
+    `us.anthropic.claude-haiku-4-5-20251001-v1:0` for low cost and latency).
     Action items use structured JSON output. Email text is wrapped in `<email>` tags and the system
     prompt treats it as untrusted (prompt-injection guard).
-- **Aurora PostgreSQL Serverless v2 + pgvector** (`infra/stacks/data.py`, schema in
-  `backend/src/email_rag/migrations/`). HNSW cosine index on `email_chunks.embedding`.
+- **RDS PostgreSQL 16 + pgvector** on a private, Single-AZ `db.t4g.micro`
+  (`infra/stacks/data.py`, schema in `backend/src/email_rag/migrations/`). This is compatible with
+  AWS Free-plan accounts; HNSW cosine index on `email_chunks.embedding`.
 - **RAG** (`services/rag.py`): embed question → top-k chunks filtered by `user_id` (and optionally
   `account_id`) → Claude answers with `[n]` citations → API returns cited source emails.
-- **S3 email bucket**: raw MIME at `users/{user_id}/accounts/{account_id}/messages/{id}.eml`.
+- **S3 email bucket**: raw MIME at `users/{user_id}/accounts/{account_id}/messages/{id}.eml`;
+  objects transition to S3 Intelligent-Tiering after 30 days.
 
 ## 5. Security & Monitoring
 
 - Secrets Manager: Google OAuth client, per-account OAuth tokens, webhook token, DB credentials.
-- KMS customer-managed key (rotation on) encrypts Aurora and the email bucket.
+- KMS customer-managed key (rotation on) encrypts RDS PostgreSQL and the email bucket.
 - Tenant isolation: every repository query in `backend/src/email_rag/repo.py` filters by `user_id`;
-  S3 keys are prefixed by `user_id`.
+  composite database foreign keys prevent cross-tenant account references, and S3 keys are prefixed
+  by `user_id`.
 - Disconnecting an account deletes its token secret, its S3 prefix and all DB rows (FK cascade).
-- CloudWatch: alarms on DLQ depth, queue age, API 5xx and Lambda errors → SNS (email via
-  `-c alarmEmail=...`); AWS Budget at 80% of `budgetUsd`; X-Ray tracing on Lambdas, API, Step Functions.
+- CloudWatch: structured API access logs, an operations dashboard, and alarms on DLQ depth, queue
+  age, API 5xx and Lambda errors → SNS (email via `-c alarmEmail=...`); AWS Budget at 80% of
+  `budgetUsd`; X-Ray tracing on Lambdas, API, Step Functions.
+- Bedrock invocation IAM is restricted to Titan Text Embeddings V2, the configured Claude
+  inference profile, and that profile's US foundation-model targets.
 
 ## Open items / next steps
 
@@ -66,8 +75,5 @@ Step numbers refer to the arrows on the architecture diagram.
   a per-tenant data key and KMS encryption context.
 - **Postgres row-level security** as defense in depth on top of the `user_id` filters.
 - **Webhook auth**: switch from the shared `?token=` to verifying Pub/Sub's OIDC JWT.
-- **Bedrock IAM**: tighten `bedrock:*` / `bedrock-mantle:*` resources to specific model ARNs and
-  confirm the Mantle action names for your region.
-- **Re-backfill** accounts whose History API cursor expired (sync marks them `status = 'error'`).
 - Stretch goals from the proposal: Outlook/Yahoo, send via provider API, digests via SES,
   priority inbox, PII redaction with Comprehend.

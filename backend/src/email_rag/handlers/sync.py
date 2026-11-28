@@ -11,6 +11,7 @@ import hmac
 import json
 from datetime import UTC, datetime, timedelta
 
+import boto3
 import httpx
 from aws_lambda_powertools import Logger
 
@@ -30,7 +31,11 @@ def sync_account(account: dict, renew_watch: bool = False) -> int:
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:  # history id too old: needs a fresh backfill
             logger.warning("history expired", extra={"account_id": account_id})
-            repo.update_sync_state(account_id, status="error")
+            repo.update_sync_state(account_id, status="backfilling")
+            boto3.client("stepfunctions").start_execution(
+                stateMachineArn=settings().backfill_state_machine_arn,
+                input=json.dumps({"account_id": account_id}),
+            )
             return 0
         raise
     queued = queue.enqueue_messages(account_id, ids)
